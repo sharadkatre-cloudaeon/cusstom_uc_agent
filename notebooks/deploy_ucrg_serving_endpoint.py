@@ -22,7 +22,7 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "main", "Unity Catalog")
+dbutils.widgets.text("catalog", "agent_ucrg", "Unity Catalog")
 dbutils.widgets.text("schema", "ucrg", "Schema")
 dbutils.widgets.text("model_name", "ucrg_agent", "Registered model name")
 dbutils.widgets.text("endpoint_name", "ucrg-agent", "Serving endpoint name")
@@ -50,13 +50,12 @@ print("Project root: auto-detected after pip install (cell 3)")
 # MAGIC %md
 # MAGIC ## 2 · Install dependencies
 # MAGIC
-# MAGIC Installs only packages not bundled on the cluster runtime. Avoid upgrading
-# MAGIC `pandas` / `mlflow` here — that triggers a Python restart and can break
-# MAGIC pre-installed notebook dependencies (protobuf, numpy, etc.).
+# MAGIC Installs packages missing from the cluster runtime. The `[databricks]` extra
+# MAGIC is required for Unity Catalog model registration on Azure Databricks.
 
 # COMMAND ----------
 
-# MAGIC %pip install anthropic>=0.39 requests>=2.31 --quiet
+# MAGIC %pip install anthropic>=0.39 requests>=2.31 "mlflow[databricks]" --quiet
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
@@ -200,7 +199,7 @@ signature = infer_signature(input_example, output_example)
 
 with mlflow.start_run(run_name="ucrg-serving") as run:
     logged = mlflow.pyfunc.log_model(
-        artifact_path="model",
+        name="model",
         python_model=UCRGServingModel(),
         code_paths=[
             f"{PROJECT_ROOT}/ucrg",
@@ -221,7 +220,7 @@ with mlflow.start_run(run_name="ucrg-serving") as run:
     )
     run_id = run.info.run_id
 
-model_uri = f"runs:/{run_id}/model"
+model_uri = logged.model_uri
 registered = mlflow.register_model(model_uri, FULL_MODEL_NAME)
 version = registered.version
 print(f"Registered {FULL_MODEL_NAME} version {version}")
