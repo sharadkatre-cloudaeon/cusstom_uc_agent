@@ -49,16 +49,45 @@ print(f"Backend: {LLM_BACKEND}")
 
 # MAGIC %md
 # MAGIC ## 2 · Install dependencies
+# MAGIC
+# MAGIC Installs only packages not bundled on the cluster runtime. Avoid upgrading
+# MAGIC `pandas` / `mlflow` here — that triggers a Python restart and can break
+# MAGIC pre-installed notebook dependencies (protobuf, numpy, etc.).
 
 # COMMAND ----------
 
-# MAGIC %pip install anthropic>=0.39 mlflow>=2.14 pandas>=2.0 --quiet
+# MAGIC %pip install anthropic>=0.39 requests>=2.31 --quiet
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 3 · Smoke-test the serving wrapper locally
+# MAGIC ## 3 · Reload config (required after `restartPython`)
+# MAGIC
+# MAGIC Widget values survive a restart; Python variables do not. Re-read them here
+# MAGIC before any downstream cells.
+
+# COMMAND ----------
+
+CATALOG = dbutils.widgets.get("catalog")
+SCHEMA = dbutils.widgets.get("schema")
+MODEL_NAME = dbutils.widgets.get("model_name")
+ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
+LLM_BACKEND = dbutils.widgets.get("llm_backend")
+SECRET_SCOPE = dbutils.widgets.get("secret_scope")
+SECRET_KEY = dbutils.widgets.get("secret_key")
+PROJECT_ROOT = dbutils.widgets.get("project_root")
+
+FULL_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
+print(f"Project root: {PROJECT_ROOT}")
+print(f"Model: {FULL_MODEL_NAME}")
+print(f"Endpoint: {ENDPOINT_NAME}")
+print(f"Backend: {LLM_BACKEND}")
+
+# COMMAND ----------
+
+# MAGIC %md
+# MAGIC ## 4 · Smoke-test the serving wrapper locally
 
 # COMMAND ----------
 
@@ -94,7 +123,7 @@ print("Smoke test OK")
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4 · Log & register the model (Unity Catalog)
+# MAGIC ## 5 · Log & register the model (Unity Catalog)
 
 # COMMAND ----------
 
@@ -156,7 +185,7 @@ client.set_registered_model_alias(FULL_MODEL_NAME, "champion", version)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 5 · Create or update the serving endpoint
+# MAGIC ## 6 · Create or update the serving endpoint
 
 # COMMAND ----------
 
@@ -197,7 +226,7 @@ print("Endpoint ready:", ENDPOINT_NAME)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6 · Invoke the endpoint (REST)
+# MAGIC ## 7 · Invoke the endpoint (REST)
 
 # COMMAND ----------
 
