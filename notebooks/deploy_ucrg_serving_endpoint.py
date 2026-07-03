@@ -29,7 +29,7 @@ dbutils.widgets.text("endpoint_name", "ucrg-agent", "Serving endpoint name")
 dbutils.widgets.dropdown("llm_backend", "anthropic", ["anthropic", "mock"], "LLM backend")
 dbutils.widgets.text("secret_scope", "ucrg", "Secret scope for ANTHROPIC_API_KEY")
 dbutils.widgets.text("secret_key", "anthropic_api_key", "Secret key name")
-dbutils.widgets.text("project_root", "/Workspace/Repos/your-org/ucrg-agent-v2.0", "Path to repo root in workspace")
+dbutils.widgets.text("project_root", "", "Repo root (blank = auto-detect from notebook path)")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
@@ -38,12 +38,12 @@ ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 LLM_BACKEND = dbutils.widgets.get("llm_backend")
 SECRET_SCOPE = dbutils.widgets.get("secret_scope")
 SECRET_KEY = dbutils.widgets.get("secret_key")
-PROJECT_ROOT = dbutils.widgets.get("project_root")
 
 FULL_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 print(f"Model: {FULL_MODEL_NAME}")
 print(f"Endpoint: {ENDPOINT_NAME}")
 print(f"Backend: {LLM_BACKEND}")
+print("Project root: auto-detected after pip install (cell 3)")
 
 # COMMAND ----------
 
@@ -69,6 +69,47 @@ print(f"Backend: {LLM_BACKEND}")
 
 # COMMAND ----------
 
+import os
+from pathlib import Path
+
+
+def _resolve_project_root(widget_value: str) -> str:
+    """Resolve repo root from widget override or this notebook's path in the workspace."""
+    cleaned = (widget_value or "").strip()
+    if cleaned:
+        root = Path(cleaned)
+        if (root / "ucrg").is_dir():
+            return str(root)
+        raise FileNotFoundError(
+            f"project_root widget is {root!s} but ucrg/ was not found there. "
+            "Clear the widget to auto-detect, or set the correct Databricks Repo path."
+        )
+
+    nb_path = (
+        dbutils.notebook.entry_point.getDbutils()
+        .notebook()
+        .getContext()
+        .notebookPath()
+        .get()
+    )
+    if not nb_path.startswith("/Workspace"):
+        nb_path = f"/Workspace{nb_path}"
+
+    cursor = Path(nb_path).parent
+    for _ in range(6):
+        if (cursor / "ucrg").is_dir() and (cursor / "data" / "ucrg_engine.json").is_file():
+            return str(cursor)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+
+    raise FileNotFoundError(
+        f"Could not auto-detect repo root from notebook path {nb_path!r}. "
+        "Set project_root to your Repo path, e.g. "
+        "/Workspace/Repos/<user-or-org>/cusstom_uc_agent"
+    )
+
+
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 MODEL_NAME = dbutils.widgets.get("model_name")
@@ -76,13 +117,14 @@ ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 LLM_BACKEND = dbutils.widgets.get("llm_backend")
 SECRET_SCOPE = dbutils.widgets.get("secret_scope")
 SECRET_KEY = dbutils.widgets.get("secret_key")
-PROJECT_ROOT = dbutils.widgets.get("project_root")
+PROJECT_ROOT = _resolve_project_root(dbutils.widgets.get("project_root"))
 
 FULL_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 print(f"Project root: {PROJECT_ROOT}")
 print(f"Model: {FULL_MODEL_NAME}")
 print(f"Endpoint: {ENDPOINT_NAME}")
 print(f"Backend: {LLM_BACKEND}")
+assert os.path.isdir(PROJECT_ROOT), f"Project root not found: {PROJECT_ROOT}"
 
 # COMMAND ----------
 
