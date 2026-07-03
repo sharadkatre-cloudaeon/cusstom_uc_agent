@@ -1,0 +1,6 @@
+# The offline mock CLI (python cli.py) needs NOTHING beyond the Python 3.10+ stdlib.
+# Install these only for the optional modes:
+
+anthropic>=0.39        # for:  python cli.py --llm anthropic   (also needs ANTHROPIC_API_KEY)
+langgraph>=0.2         # for:  python -m ucrg.graph           (the production graph runtime)
+pytest>=8.0            # for:  python -m pytest -q            (test runner)
