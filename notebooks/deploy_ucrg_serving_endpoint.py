@@ -126,6 +126,11 @@ print(f"Endpoint: {ENDPOINT_NAME}")
 print(f"Backend: {LLM_BACKEND}")
 assert os.path.isdir(PROJECT_ROOT), f"Project root not found: {PROJECT_ROOT}"
 
+if LLM_BACKEND == "anthropic":
+    os.environ["ANTHROPIC_API_KEY"] = dbutils.secrets.get(
+        scope=SECRET_SCOPE, key=SECRET_KEY
+    )
+
 # COMMAND ----------
 
 # MAGIC %md
@@ -228,11 +233,46 @@ client.set_registered_model_alias(FULL_MODEL_NAME, "champion", version)
 
 # MAGIC %md
 # MAGIC ## 6 · Create or update the serving endpoint
+# MAGIC
+# MAGIC If `version` is missing (kernel restart or cell 5 skipped), resolves the
+# MAGIC `champion` alias or latest registered version from Unity Catalog.
 
 # COMMAND ----------
 
+import mlflow
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedEntityInput
+from mlflow.tracking import MlflowClient
+
+mlflow.set_registry_uri("databricks-uc")
+
+if "FULL_MODEL_NAME" not in globals():
+    CATALOG = dbutils.widgets.get("catalog")
+    SCHEMA = dbutils.widgets.get("schema")
+    MODEL_NAME = dbutils.widgets.get("model_name")
+    ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
+    LLM_BACKEND = dbutils.widgets.get("llm_backend")
+    SECRET_SCOPE = dbutils.widgets.get("secret_scope")
+    SECRET_KEY = dbutils.widgets.get("secret_key")
+    FULL_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
+
+
+def _resolve_model_version(model_name: str) -> str:
+    client = MlflowClient()
+    try:
+        return str(client.get_model_version_by_alias(model_name, "champion").version)
+    except Exception:
+        versions = client.search_model_versions(f"name='{model_name}'")
+        if not versions:
+            raise RuntimeError(
+                f"No registered versions for {model_name}. Run section 5 first."
+            )
+        return str(max(versions, key=lambda mv: int(mv.version)).version)
+
+
+if "version" not in globals():
+    version = _resolve_model_version(FULL_MODEL_NAME)
+    print(f"Resolved model version: {version}")
 
 w = WorkspaceClient()
 
