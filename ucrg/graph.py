@@ -34,7 +34,9 @@ def _queue_for_segment(state: UCRGState) -> list:
     q = [question_dict(fq) for fq in form_questions(state.current_segment)]
     if is_firm(state.classification):
         p = state.classification["primary"]
-        act = lookup_followups(p["domain"], p["level"])
+        act = lookup_followups(
+            p["domain"], p["level"], answers=state.answers, signals=state.signals,
+        )
         for it in act["ask"]:
             if it["id"] not in state.asked_followup_ids and state.current_segment in _segs(it["asked_in"]):
                 state.asked_followup_ids.add(it["id"])

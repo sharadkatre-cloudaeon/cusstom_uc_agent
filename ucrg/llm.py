@@ -26,6 +26,8 @@ PHRASE_QUESTION_INSTRUCTION = (
     "Rephrase the following intake question in one short, business-friendly "
     "sentence for a non-technical business user. "
     "Stay strictly within the intent — do not add new details. Just ask directly.\n"
+    "If prior conversation context is provided, reference it naturally — do not "
+    "repeat information the user already gave.\n"
     "Do not list answer options — they are appended separately.\n\n"
     + _PHRASE_OUTPUT_RULE
 )
@@ -48,8 +50,33 @@ _META_PREFIXES = (
 )
 
 
+def _phrase_prompt(question_text: str, simpler: bool, context: str | None) -> str:
+    base = f"{_phrase_instruction(simpler)}\n\nTemplate: {question_text}"
+    if context:
+        base = f"{base}\n\n{context}"
+    return base
+
+
+def _already_covered_prompt(qid: str, question_text: str, state) -> str:
+    prior = []
+    for k, v in sorted(state.answers.items()):
+        prior.append(f"[{k}] {v}")
+    blob = "\n".join(prior) or "(none)"
+    return (
+        f"Question to ask ({qid}): {question_text}\n\n"
+        f"Answers so far:\n{blob}\n\n"
+        "Is this question already fully answered by the transcript above? "
+        "Reply with ONLY yes or no."
+    )
+
+
 def _phrase_instruction(simpler: bool) -> str:
     return PHRASE_QUESTION_SIMPLER_INSTRUCTION if simpler else PHRASE_QUESTION_INSTRUCTION
+
+
+def _parse_yes_no_reply(raw: str) -> bool:
+    t = (raw or "").strip().lower()
+    return t.startswith("y") and not t.startswith("no")
 
 
 def _clean_phrase_output(text: str) -> str:
@@ -143,7 +170,12 @@ def keyword_signals(qid: str, text: str) -> dict:
         s["regulated"] = bool(t.strip()) and not is_not_sure(t) and not is_no(t) and any(
             w in t for w in ("law", "regul", "gdpr", "hipaa", "compliance", "policy", "pci", "act"))
     elif qid == "Q22":
-        s["impact_failure"] = "high" if any(w in t for w in ("serious", "major", "critical", "severe")) else "low"
+        if any(w in t for w in ("serious", "major", "critical", "severe")):
+            s["impact_failure"] = "high"
+        elif any(w in t for w in ("minor", "low", "small", "annoyance")):
+            s["impact_failure"] = "low"
+        else:
+            s["impact_failure"] = "medium"
     return s
 
 
@@ -160,12 +192,18 @@ class MockLLM:
         question_text: str,
         simpler: bool = False,
         options: list[str] | None = None,
+        context: str | None = None,
     ) -> str:
         if simpler:
             base = "Let me put that more simply — " + question_text
+        elif context:
+            base = f"Building on what you've shared — {question_text}"
         else:
             base = question_text
         return append_choice_hint(base, options)
+
+    def already_covered(self, qid: str, question_text: str, state) -> bool:
+        return False
 
     def extract_signals(self, qid: str, question_text: str, answer_text: str) -> dict:
         return keyword_signals(qid, answer_text)
@@ -202,10 +240,15 @@ class DatabricksLLM:
         question_text: str,
         simpler: bool = False,
         options: list[str] | None = None,
+        context: str | None = None,
     ) -> str:
-        prompt = f"{_phrase_instruction(simpler)}\n\nTemplate: {question_text}"
+        prompt = _phrase_prompt(question_text, simpler, context)
         base = _clean_phrase_output(self._invoke(prompt))
         return append_choice_hint(base, options)
+
+    def already_covered(self, qid: str, question_text: str, state) -> bool:
+        raw = self._invoke(_already_covered_prompt(qid, question_text, state))
+        return _parse_yes_no_reply(raw)
 
     def extract_signals(self, qid: str, question_text: str, answer_text: str) -> dict:
         schema_hint = (
@@ -240,13 +283,21 @@ class AnthropicLLM:
         question_text: str,
         simpler: bool = False,
         options: list[str] | None = None,
+        context: str | None = None,
     ) -> str:
-        prompt = f"{_phrase_instruction(simpler)}\n\nTemplate: {question_text}"
+        prompt = _phrase_prompt(question_text, simpler, context)
         msg = self.client.messages.create(
             model=self.model, max_tokens=120, system=self.system,
             messages=[{"role": "user", "content": prompt}])
         base = _clean_phrase_output("".join(b.text for b in msg.content if b.type == "text"))
         return append_choice_hint(base, options)
+
+    def already_covered(self, qid: str, question_text: str, state) -> bool:
+        msg = self.client.messages.create(
+            model=self.model, max_tokens=8, system=self.system,
+            messages=[{"role": "user", "content": _already_covered_prompt(qid, question_text, state)}])
+        raw = "".join(b.text for b in msg.content if b.type == "text")
+        return _parse_yes_no_reply(raw)
 
     def extract_signals(self, qid: str, question_text: str, answer_text: str) -> dict:
         schema_hint = ("Return ONLY a JSON object of relevant signals among: domain_hint(GA/DS/AA/AU), "

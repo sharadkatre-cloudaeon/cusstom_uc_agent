@@ -37,7 +37,7 @@ Work through these in order. For each segment: ask the **standard questions** (p
 ### Segment 1 · Use Case Snapshot
 - "In a sentence or two, what would you like this to do?"
 - "What problem does it solve, and how is that handled today — manually, with an existing tool, or not at all?"
-- "Who is the person accountable for this use case?"
+- "Who is the person accountable for this use case, and which business domain or department are they in?"
 
 *Listening for (internal):* first hint of the AI domain, the business case, a success signal, and the owner.
 *Complete when:* the goal, the value, and an owner are captured.

@@ -43,6 +43,7 @@ from mlflow.types.agent import (
 )
 
 from ucrg.driver import UCRGAgent
+from ucrg.response_meta import build_response_meta
 from ucrg.session_cache import (
     SnapshotCache,
     TurnCache,
@@ -83,6 +84,7 @@ def _build_view(agent: UCRGAgent, result: dict[str, Any]) -> dict[str, Any]:
         "classification": agent.s.classification,
         "gate_verdict": agent.s.gate_verdict,
         "open_items": agent.s.open_items,
+        **build_response_meta(agent),
     }
 
 

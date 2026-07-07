@@ -51,7 +51,7 @@
     {
       "id": "Q1",
       "segment": "1 · Use Case Snapshot",
-      "question": "In a sentence or two, what do you want this to do?",
+      "question": "What's the idea in your own words — what would you love this to help with?",
       "answer_type": "Text",
       "resolves": "Seeds domain",
       "gate_critical": false,
@@ -73,6 +73,14 @@
       "segment": "1 · Use Case Snapshot",
       "question": "Who is the accountable owner for this?",
       "answer_type": "Name / role",
+      "additional_fields": [
+        {
+          "id": "domain",
+          "label": "Business domain or department",
+          "widget": "text_short",
+          "placeholder": "e.g. HR, Finance, Operations"
+        }
+      ],
       "resolves": "Gate: accountability",
       "gate_critical": false,
       "child_count": 7,

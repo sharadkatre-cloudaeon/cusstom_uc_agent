@@ -16,4 +16,8 @@ class UCRGState:
     gate_verdict: dict = field(default_factory=dict)
     output: dict = field(default_factory=dict)           # {"sdd": str, "scorecard": str}
     transcript: list = field(default_factory=list)       # [(role, text), ...]
+    phrased_questions: dict = field(default_factory=dict)  # cache_key -> displayed question text
+    derived: dict = field(default_factory=dict)          # qid -> derived/skipped note
+    skipped_ids: set = field(default_factory=set)        # questions skipped as already covered
+    dynamic_options: dict = field(default_factory=dict)  # qid -> contextual option list
     done: bool = False

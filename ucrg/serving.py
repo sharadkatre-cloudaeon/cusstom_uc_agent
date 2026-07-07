@@ -10,7 +10,7 @@ Request columns (DataFrame or single dict):
   session_state  JSON blob from prior response (required for send after start)
 
 Response columns:
-  session_id, message, done, session_state, output_json, error
+  session_id, message, done, session_state, output_json, error, meta_json, ...
 """
 from __future__ import annotations
 
@@ -22,6 +22,7 @@ import mlflow.pyfunc
 import pandas as pd
 
 from .driver import UCRGAgent
+from .response_meta import build_response_meta
 
 
 def _read_system_prompt(context) -> str:
@@ -46,6 +47,11 @@ def _row_value(row, key: str, default: str = "") -> str:
     return str(val)
 
 
+def _response(agent: UCRGAgent, **fields) -> dict:
+    meta = build_response_meta(agent)
+    return {**fields, **meta, "meta_json": json.dumps(meta, ensure_ascii=False)}
+
+
 def _handle(action: str, session_id: str, message: str, session_state: str,
             backend: str, system_prompt: str) -> dict:
     action = (action or "send").strip().lower()
@@ -59,20 +65,22 @@ def _handle(action: str, session_id: str, message: str, session_state: str,
             "session_state": "",
             "output_json": "",
             "error": "",
+            "meta_json": "",
         }
 
     if action == "start":
         agent = UCRGAgent(backend=backend, system_prompt=system_prompt)
         msg = agent.start()
         blob = agent.dump_session()
-        return {
-            "session_id": session_id,
-            "message": msg,
-            "done": False,
-            "session_state": UCRGAgent.dumps_session(blob),
-            "output_json": "",
-            "error": "",
-        }
+        return _response(
+            agent,
+            session_id=session_id,
+            message=msg,
+            done=False,
+            session_state=UCRGAgent.dumps_session(blob),
+            output_json="",
+            error="",
+        )
 
     if action == "send":
         if not session_state:
@@ -83,6 +91,7 @@ def _handle(action: str, session_id: str, message: str, session_state: str,
                 "session_state": "",
                 "output_json": "",
                 "error": "session_state is required for action=send",
+                "meta_json": "",
             }
         try:
             blob = UCRGAgent.loads_session(session_state)
@@ -95,6 +104,7 @@ def _handle(action: str, session_id: str, message: str, session_state: str,
                 "session_state": session_state,
                 "output_json": "",
                 "error": f"invalid session_state: {exc}",
+                "meta_json": "",
             }
 
         result = agent.send(message)
@@ -102,14 +112,15 @@ def _handle(action: str, session_id: str, message: str, session_state: str,
         output_json = ""
         if result.get("output"):
             output_json = json.dumps(result["output"], ensure_ascii=False)
-        return {
-            "session_id": session_id,
-            "message": result.get("message", ""),
-            "done": bool(result.get("done")),
-            "session_state": UCRGAgent.dumps_session(out_blob),
-            "output_json": output_json,
-            "error": "",
-        }
+        return _response(
+            agent,
+            session_id=session_id,
+            message=result.get("message", ""),
+            done=bool(result.get("done")),
+            session_state=UCRGAgent.dumps_session(out_blob),
+            output_json=output_json,
+            error="",
+        )
 
     return {
         "session_id": session_id,
@@ -118,6 +129,7 @@ def _handle(action: str, session_id: str, message: str, session_state: str,
         "session_state": session_state,
         "output_json": "",
         "error": f"unknown action: {action}",
+        "meta_json": "",
     }
 
 
