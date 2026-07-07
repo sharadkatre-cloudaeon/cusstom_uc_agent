@@ -16,7 +16,7 @@ from langgraph.types import interrupt, Command
 from langgraph.checkpoint.memory import MemorySaver
 
 from .state import UCRGState
-from .engine import form_questions, segment_label, lookup_followups
+from .engine import form_questions, question_dict, segment_label, lookup_followups
 from .classify import classify_use_case, is_firm
 from .gate import gate_inputs_from, run_decision_gate
 from .compose import compose_output
@@ -31,8 +31,7 @@ def _segs(asked_in: str) -> set:
 
 def _queue_for_segment(state: UCRGState) -> list:
     """Standard questions for the current segment + activated follow-ups (ask) for it."""
-    q = [{"id": fq["id"], "text": fq["question"], "kind": "standard"}
-         for fq in form_questions(state.current_segment)]
+    q = [question_dict(fq) for fq in form_questions(state.current_segment)]
     if is_firm(state.classification):
         p = state.classification["primary"]
         act = lookup_followups(p["domain"], p["level"])
@@ -55,7 +54,10 @@ def greet(state: UCRGState):
 def ask_segment(state: UCRGState):
     """Ask every queued question for the current segment, pausing at each via interrupt."""
     for q in _queue_for_segment(state):
-        reply = interrupt({"question": _LLM.phrase(q["text"])})
+        reply = interrupt({
+            "question": _LLM.phrase(q["text"], options=q.get("options")),
+            "options": q.get("options"),
+        })
         if q["kind"] == "followup" and is_not_sure(reply):
             state.open_items.append({"id": q["id"], "open_item": q["text"], "area": "—"})
             continue

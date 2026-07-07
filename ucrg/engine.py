@@ -4,6 +4,8 @@ import json
 import os
 from pathlib import Path
 
+from .answer_options import parse_answer_options
+
 _DEFAULT = Path(__file__).resolve().parent.parent / "data" / "ucrg_engine.json"
 _PATH = Path(os.environ["UCRG_ENGINE_PATH"]) if os.environ.get("UCRG_ENGINE_PATH") else _DEFAULT
 ENGINE = json.loads(_PATH.read_text(encoding="utf-8"))
@@ -44,6 +46,18 @@ def form_questions(segment: int | None = None) -> list:
     if segment is not None:
         qs = [q for q in qs if str(q["segment"]).startswith(f"{segment} ")]
     return qs
+
+
+def question_dict(fq: dict, *, kind: str = "standard") -> dict:
+    """Normalise a form question into the shape used by driver/graph."""
+    answer_type = fq.get("answer_type", "Text")
+    return {
+        "id": fq["id"],
+        "text": fq["question"],
+        "kind": kind,
+        "answer_type": answer_type,
+        "options": parse_answer_options(answer_type),
+    }
 
 
 def segment_label(segment: int) -> str:

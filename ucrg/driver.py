@@ -9,7 +9,7 @@ import re
 from dataclasses import asdict
 
 from .state import UCRGState
-from .engine import form_questions, segment_label, lookup_followups
+from .engine import form_questions, question_dict, segment_label, lookup_followups
 from .classify import classify_use_case, is_firm
 from .gate import gate_inputs_from, run_decision_gate
 from .compose import compose_output
@@ -51,7 +51,7 @@ class UCRGAgent:
         if q["kind"] == "followup" and is_not_sure(user_text):
             self.s.attempts[q["id"]] = self.s.attempts.get(q["id"], 0) + 1
             if self.s.attempts[q["id"]] < 2:
-                text = self.llm.phrase(q["text"], simpler=True)
+                text = self.llm.phrase(q["text"], simpler=True, options=q.get("options"))
                 self._current = {**q, "kind": "rephrase"}
                 self.s.transcript.append(("agent", text))
                 return {"message": text, "done": False}
@@ -65,8 +65,7 @@ class UCRGAgent:
 
     # -- internals ------------------------------------------------------
     def _load_segment(self, seg: int):
-        self._std = [{"id": fq["id"], "text": fq["question"], "kind": "standard"}
-                     for fq in form_questions(seg)]
+        self._std = [question_dict(fq) for fq in form_questions(seg)]
         self._fu = []
 
     def _next_question(self):
@@ -77,7 +76,11 @@ class UCRGAgent:
         else:
             return None
         self._current = q
-        return self.llm.phrase(q["text"], simpler=(q["kind"] == "rephrase"))
+        return self.llm.phrase(
+            q["text"],
+            simpler=(q["kind"] == "rephrase"),
+            options=q.get("options"),
+        )
 
     def _record(self, q, text):
         self.s.answers[q["id"]] = text

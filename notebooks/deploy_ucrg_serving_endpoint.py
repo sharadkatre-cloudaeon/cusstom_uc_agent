@@ -1,19 +1,24 @@
 # Databricks notebook source
 # MAGIC %md
-# MAGIC # Deploy UCRG Agent to Databricks Model Serving
+# MAGIC # Deploy UCRG Agent to Mosaic AI (Playground + Review App)
 # MAGIC
-# MAGIC Packages the Use-Case Requirement Gathering agent as an MLflow **pyfunc** model
-# MAGIC and deploys it to a **Model Serving endpoint**.
+# MAGIC Packages the Use-Case Requirement Gathering agent as an MLflow **ChatAgent**
+# MAGIC and deploys via `databricks.agents.deploy()` so it appears in **Mosaic AI → Playground**.
 # MAGIC
-# MAGIC **Protocol (stateless, multi-replica safe)**
-# MAGIC 1. `action=start` → returns greeting + first question + `session_state`
-# MAGIC 2. `action=send` + user `message` + prior `session_state` → next turn
-# MAGIC 3. When `done=true`, parse `output_json` for SDD + scorecard markdown
+# MAGIC **Protocol**
+# MAGIC - Playground / Review App: OpenAI-style `messages[]` (state replayed from history)
+# MAGIC - Production frontend: send `custom_inputs.session_state` from prior `custom_outputs`
+# MAGIC - When `custom_outputs.done=true`, parse `custom_outputs.output_json` for SDD + scorecard
 # MAGIC
 # MAGIC **Prerequisites**
 # MAGIC - Unity Catalog model registry (`catalog.schema.model_name`)
-# MAGIC - Secret scope with `ANTHROPIC_API_KEY` (for `--llm anthropic` behaviour)
-# MAGIC - Upload this repo to Databricks (Repos or workspace files) so `ucrg/`, `data/`, `prompts/` are available
+# MAGIC - A Foundation Model serving endpoint (e.g. `databricks-claude-opus-4-6`) when using `databricks` backend
+# MAGIC - Secret scope with `ANTHROPIC_API_KEY` only when using external `anthropic` backend
+# MAGIC - Upload this repo to Databricks (Repos) so `ucrg/`, `data/`, `prompts/`, `databricks_agent.py` exist
+# MAGIC - DBR 15.4 ML LTS or newer
+# MAGIC
+# MAGIC **Auth pattern:** `databricks` backend declares the FM endpoint as a `DatabricksServingEndpoint`
+# MAGIC resource at log time — deployed agents get automatic M2M OAuth passthrough (no PAT / apiToken).
 
 # COMMAND ----------
 
@@ -22,53 +27,59 @@
 
 # COMMAND ----------
 
-dbutils.widgets.text("catalog", "agent_ucrg", "Unity Catalog")
-dbutils.widgets.text("schema", "ucrg", "Schema")
+dbutils.widgets.text("catalog", "ai_build", "Unity Catalog")
+dbutils.widgets.text("schema", "atlas_serve_build", "Schema")
 dbutils.widgets.text("model_name", "ucrg_agent", "Registered model name")
-dbutils.widgets.text("endpoint_name", "ucrg-agent", "Serving endpoint name")
-dbutils.widgets.dropdown("llm_backend", "anthropic", ["anthropic", "mock"], "LLM backend")
+dbutils.widgets.dropdown("llm_backend", "databricks", ["databricks", "anthropic", "mock"], "LLM backend")
+dbutils.widgets.text("llm_endpoint", "databricks-claude-opus-4-6", "FM serving endpoint (databricks backend)")
 dbutils.widgets.text("secret_scope", "ucrg", "Secret scope for ANTHROPIC_API_KEY")
 dbutils.widgets.text("secret_key", "anthropic_api_key", "Secret key name")
 dbutils.widgets.text("project_root", "", "Repo root (blank = auto-detect from notebook path)")
+dbutils.widgets.dropdown("scale_to_zero", "true", ["true", "false"], "Scale endpoint to zero")
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 MODEL_NAME = dbutils.widgets.get("model_name")
-ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 LLM_BACKEND = dbutils.widgets.get("llm_backend")
+LLM_ENDPOINT = dbutils.widgets.get("llm_endpoint")
 SECRET_SCOPE = dbutils.widgets.get("secret_scope")
 SECRET_KEY = dbutils.widgets.get("secret_key")
+SCALE_TO_ZERO = dbutils.widgets.get("scale_to_zero").lower() == "true"
 
 FULL_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 print(f"Model: {FULL_MODEL_NAME}")
-print(f"Endpoint: {ENDPOINT_NAME}")
 print(f"Backend: {LLM_BACKEND}")
+if LLM_BACKEND == "databricks":
+    print(f"LLM endpoint: {LLM_ENDPOINT}")
+print(f"Scale to zero: {SCALE_TO_ZERO}")
 print("Project root: auto-detected after pip install (cell 3)")
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 2 · Install dependencies
-# MAGIC
-# MAGIC Installs packages missing from the cluster runtime. The `[databricks]` extra
-# MAGIC is required for Unity Catalog model registration on Azure Databricks.
 
 # COMMAND ----------
 
-# MAGIC %pip install anthropic>=0.39 requests>=2.31 "mlflow[databricks]" --quiet
+# MAGIC %pip install -U \
+# MAGIC   "anthropic>=0.39" \
+# MAGIC   "mlflow[databricks]>=2.20" \
+# MAGIC   "databricks-agents>=0.16" \
+# MAGIC   "databricks-langchain>=0.4" \
+# MAGIC   "langchain-core>=0.3" \
+# MAGIC   "pydantic>=2.9" \
+# MAGIC   --quiet
 # MAGIC dbutils.library.restartPython()
 
 # COMMAND ----------
 
 # MAGIC %md
 # MAGIC ## 3 · Reload config (required after `restartPython`)
-# MAGIC
-# MAGIC Widget values survive a restart; Python variables do not. Re-read them here
-# MAGIC before any downstream cells.
 
 # COMMAND ----------
 
 import os
+import sys
 from pathlib import Path
 
 
@@ -77,10 +88,10 @@ def _resolve_project_root(widget_value: str) -> str:
     cleaned = (widget_value or "").strip()
     if cleaned:
         root = Path(cleaned)
-        if (root / "ucrg").is_dir():
+        if (root / "ucrg").is_dir() and (root / "databricks_agent.py").is_file():
             return str(root)
         raise FileNotFoundError(
-            f"project_root widget is {root!s} but ucrg/ was not found there. "
+            f"project_root widget is {root!s} but ucrg/ or databricks_agent.py was not found. "
             "Clear the widget to auto-detect, or set the correct Databricks Repo path."
         )
 
@@ -96,7 +107,11 @@ def _resolve_project_root(widget_value: str) -> str:
 
     cursor = Path(nb_path).parent
     for _ in range(6):
-        if (cursor / "ucrg").is_dir() and (cursor / "data" / "ucrg_engine.json").is_file():
+        if (
+            (cursor / "ucrg").is_dir()
+            and (cursor / "data" / "ucrg_engine.json").is_file()
+            and (cursor / "databricks_agent.py").is_file()
+        ):
             return str(cursor)
         if cursor.parent == cursor:
             break
@@ -105,27 +120,36 @@ def _resolve_project_root(widget_value: str) -> str:
     raise FileNotFoundError(
         f"Could not auto-detect repo root from notebook path {nb_path!r}. "
         "Set project_root to your Repo path, e.g. "
-        "/Workspace/Repos/<user-or-org>/cusstom_uc_agent"
+        "/Workspace/Repos/<user-or-org>/dta-ai-usecase-requirement-gathering-agent/ucrg-agent"
     )
 
 
 CATALOG = dbutils.widgets.get("catalog")
 SCHEMA = dbutils.widgets.get("schema")
 MODEL_NAME = dbutils.widgets.get("model_name")
-ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
 LLM_BACKEND = dbutils.widgets.get("llm_backend")
+LLM_ENDPOINT = dbutils.widgets.get("llm_endpoint")
 SECRET_SCOPE = dbutils.widgets.get("secret_scope")
 SECRET_KEY = dbutils.widgets.get("secret_key")
+SCALE_TO_ZERO = dbutils.widgets.get("scale_to_zero").lower() == "true"
 PROJECT_ROOT = _resolve_project_root(dbutils.widgets.get("project_root"))
 
 FULL_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 print(f"Project root: {PROJECT_ROOT}")
 print(f"Model: {FULL_MODEL_NAME}")
-print(f"Endpoint: {ENDPOINT_NAME}")
 print(f"Backend: {LLM_BACKEND}")
+if LLM_BACKEND == "databricks":
+    print(f"LLM endpoint: {LLM_ENDPOINT}")
 assert os.path.isdir(PROJECT_ROOT), f"Project root not found: {PROJECT_ROOT}"
 
-if LLM_BACKEND == "anthropic":
+os.chdir(PROJECT_ROOT)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+os.environ["UCRG_LLM_BACKEND"] = LLM_BACKEND
+if LLM_BACKEND == "databricks":
+    os.environ["DATABRICKS_LLM_ENDPOINT"] = LLM_ENDPOINT
+elif LLM_BACKEND == "anthropic":
     os.environ["ANTHROPIC_API_KEY"] = dbutils.secrets.get(
         scope=SECRET_SCOPE, key=SECRET_KEY
     )
@@ -133,37 +157,19 @@ if LLM_BACKEND == "anthropic":
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 4 · Smoke-test the serving wrapper locally
+# MAGIC ## 4 · Smoke-test the ChatAgent locally
 
 # COMMAND ----------
 
-import os
-import sys
+from databricks_agent import AGENT
+from mlflow.types.agent import ChatAgentMessage
 
-sys.path.insert(0, PROJECT_ROOT)
-os.chdir(PROJECT_ROOT)
-
-import pandas as pd
-from ucrg.serving import UCRGServingModel
-
-class _Ctx:
-    artifacts = {
-        "ucrg_engine": f"{PROJECT_ROOT}/data/ucrg_engine.json",
-        "system_prompt": f"{PROJECT_ROOT}/prompts/system_prompt.md",
-    }
-    model_config = {"backend": LLM_BACKEND}
-
-model = UCRGServingModel()
-model.load_context(_Ctx())
-
-start = model.predict(_Ctx(), pd.DataFrame([{
-    "action": "start",
-    "session_id": "smoke-test",
-    "message": "",
-    "session_state": "",
-}]))
-print(start.iloc[0]["message"][:200], "…")
-assert start.iloc[0]["session_state"], "expected session_state blob"
+resp = AGENT.predict(
+    messages=[ChatAgentMessage(role="user", content="hi")],
+    custom_inputs={},
+)
+print("Assistant:", resp.messages[-1].content[:300], "…")
+assert resp.custom_outputs.get("session_state"), "expected session_state in custom_outputs"
 print("Smoke test OK")
 
 # COMMAND ----------
@@ -174,49 +180,37 @@ print("Smoke test OK")
 # COMMAND ----------
 
 import mlflow
-from mlflow.models import infer_signature
+from mlflow.models.resources import DatabricksServingEndpoint
 from mlflow.tracking import MlflowClient
+from pkg_resources import get_distribution
 
 mlflow.set_registry_uri("databricks-uc")
 
-input_example = pd.DataFrame([{
-    "action": "start",
-    "session_id": "example",
-    "message": "",
-    "session_state": "",
-}])
+pip_requirements = [
+    f"mlflow=={get_distribution('mlflow').version}",
+    "databricks-agents",
+    "databricks-langchain>=0.4",
+    "langchain-core>=0.3",
+    "anthropic>=0.39",
+    "pydantic>=2.9",
+]
 
-output_example = pd.DataFrame([{
-    "session_id": "example",
-    "message": "Hi! …",
-    "done": False,
-    "session_state": "{}",
-    "output_json": "",
-    "error": "",
-}])
+resources = []
+if LLM_BACKEND == "databricks":
+    resources = [DatabricksServingEndpoint(endpoint_name=LLM_ENDPOINT)]
+    print(f"Declaring resource dependency: {LLM_ENDPOINT}")
 
-signature = infer_signature(input_example, output_example)
-
-with mlflow.start_run(run_name="ucrg-serving") as run:
+with mlflow.start_run(run_name="ucrg-chat-agent") as run:
     logged = mlflow.pyfunc.log_model(
-        name="model",
-        python_model=UCRGServingModel(),
+        artifact_path="agent",
+        python_model="databricks_agent.py",
         code_paths=[
             f"{PROJECT_ROOT}/ucrg",
             f"{PROJECT_ROOT}/data",
             f"{PROJECT_ROOT}/prompts",
         ],
-        artifacts={
-            "ucrg_engine": f"{PROJECT_ROOT}/data/ucrg_engine.json",
-            "system_prompt": f"{PROJECT_ROOT}/prompts/system_prompt.md",
-        },
-        pip_requirements=[
-            "anthropic>=0.39",
-            "pandas>=2.0",
-        ],
-        signature=signature,
-        input_example=input_example,
-        model_config={"backend": LLM_BACKEND},
+        pip_requirements=pip_requirements,
+        resources=resources,
     )
     run_id = run.info.run_id
 
@@ -231,28 +225,24 @@ client.set_registered_model_alias(FULL_MODEL_NAME, "champion", version)
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 6 · Create or update the serving endpoint
+# MAGIC ## 6 · Deploy as a Mosaic AI Agent (Playground + Review App)
 # MAGIC
-# MAGIC If `version` is missing (kernel restart or cell 5 skipped), resolves the
-# MAGIC `champion` alias or latest registered version from Unity Catalog.
+# MAGIC Uses `databricks.agents.deploy()` — **required** for Playground visibility.
+# MAGIC A plain Model Serving endpoint (pyfunc DataFrame protocol) does not appear there.
 
 # COMMAND ----------
 
-import mlflow
-from databricks.sdk import WorkspaceClient
-from databricks.sdk.service.serving import EndpointCoreConfigInput, ServedEntityInput
-from mlflow.tracking import MlflowClient
-
-mlflow.set_registry_uri("databricks-uc")
+from databricks import agents
 
 if "FULL_MODEL_NAME" not in globals():
     CATALOG = dbutils.widgets.get("catalog")
     SCHEMA = dbutils.widgets.get("schema")
     MODEL_NAME = dbutils.widgets.get("model_name")
-    ENDPOINT_NAME = dbutils.widgets.get("endpoint_name")
     LLM_BACKEND = dbutils.widgets.get("llm_backend")
+    LLM_ENDPOINT = dbutils.widgets.get("llm_endpoint")
     SECRET_SCOPE = dbutils.widgets.get("secret_scope")
     SECRET_KEY = dbutils.widgets.get("secret_key")
+    SCALE_TO_ZERO = dbutils.widgets.get("scale_to_zero").lower() == "true"
     FULL_MODEL_NAME = f"{CATALOG}.{SCHEMA}.{MODEL_NAME}"
 
 
@@ -273,84 +263,46 @@ if "version" not in globals():
     version = _resolve_model_version(FULL_MODEL_NAME)
     print(f"Resolved model version: {version}")
 
-w = WorkspaceClient()
+env_vars = {"UCRG_LLM_BACKEND": LLM_BACKEND}
+if LLM_BACKEND == "databricks":
+    env_vars["DATABRICKS_LLM_ENDPOINT"] = LLM_ENDPOINT
+elif LLM_BACKEND == "anthropic":
+    env_vars["ANTHROPIC_API_KEY"] = f"{{{{secrets/{SECRET_SCOPE}/{SECRET_KEY}}}}}"
 
-served_entity = ServedEntityInput(
-    entity_name=FULL_MODEL_NAME,
-    entity_version=version,
-    workload_size="Small",
-    scale_to_zero_enabled=True,
-    environment_vars={
-        "UCRG_LLM_BACKEND": LLM_BACKEND,
-        "ANTHROPIC_API_KEY": f"{{{{secrets/{SECRET_SCOPE}/{SECRET_KEY}}}}}",
-    },
+deployment = agents.deploy(
+    model_name=FULL_MODEL_NAME,
+    model_version=int(version),
+    scale_to_zero=SCALE_TO_ZERO,
+    environment_vars=env_vars,
+    tags={"project": "ucrg", "stage": "prototype"},
 )
 
-endpoint_config = EndpointCoreConfigInput(served_entities=[served_entity])
-
-existing = [ep for ep in w.serving_endpoints.list() if ep.name == ENDPOINT_NAME]
-if existing:
-    print(f"Updating endpoint {ENDPOINT_NAME} → v{version}")
-    w.serving_endpoints.update_config_and_wait(
-        name=ENDPOINT_NAME,
-        served_entities=endpoint_config.served_entities,
-    )
-else:
-    print(f"Creating endpoint {ENDPOINT_NAME}")
-    w.serving_endpoints.create_and_wait(
-        name=ENDPOINT_NAME,
-        config=endpoint_config,
-    )
-
-print("Endpoint ready:", ENDPOINT_NAME)
+print("Serving endpoint:", deployment.endpoint_name)
+print("Review app URL:  ", deployment.review_app_url)
+print()
+print("Open the Review App URL above to chat with the agent.")
+print("Or test from Playground: Mosaic AI → Playground → select the endpoint above.")
 
 # COMMAND ----------
 
 # MAGIC %md
-# MAGIC ## 7 · Invoke the endpoint (REST)
+# MAGIC ## 7 · Smoke-test the deployed endpoint
+# MAGIC
+# MAGIC Uses ambient notebook credentials via MLflow Deployments SDK — no captured apiToken.
 
 # COMMAND ----------
 
-import json
-import requests
+from mlflow.deployments import get_deploy_client
 
-host = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiUrl().get()
-token = dbutils.notebook.entry_point.getDbutils().notebook().getContext().apiToken().get()
-url = f"{host}/serving-endpoints/{ENDPOINT_NAME}/invocations"
-
-headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-
-def invoke(records: list[dict]) -> list[dict]:
-    payload = {"dataframe_records": records}
-    resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    resp.raise_for_status()
-    body = resp.json()
-    preds = body.get("predictions", body)
-    if isinstance(preds, dict) and "data" in preds:
-        cols = preds["columns"]
-        return [dict(zip(cols, row)) for row in preds["data"]]
-    return preds
-
-# Start interview
-turn = invoke([{
-    "action": "start",
-    "session_id": "notebook-demo",
-    "message": "",
-    "session_state": "",
-}])[0]
-print("Agent:", turn["message"][:300], "…\n")
-
-session_state = turn["session_state"]
-
-# Example answer — replace with real user input in your app
-turn = invoke([{
-    "action": "send",
-    "session_id": "notebook-demo",
-    "message": "I want a chatbot that answers HR policy questions from our internal wiki.",
-    "session_state": session_state,
-}])[0]
-print("Agent:", turn["message"][:300], "…")
-print("done:", turn["done"])
+client = get_deploy_client("databricks")
+out = client.predict(
+    endpoint=deployment.endpoint_name,
+    inputs={
+        "messages": [{"role": "user", "content": "hi"}],
+        "custom_inputs": {},
+    },
+)
+print(out)
 
 # COMMAND ----------
 
@@ -359,11 +311,19 @@ print("done:", turn["done"])
 # MAGIC
 # MAGIC | Field | Description |
 # MAGIC |---|---|
-# MAGIC | `action` | `start` · `send` · `reset` |
-# MAGIC | `session_id` | Your conversation / user correlation id |
-# MAGIC | `message` | User reply (empty for `start`) |
-# MAGIC | `session_state` | Opaque JSON string — **store client-side** and send back each turn |
-# MAGIC | `output_json` | When `done=true`, JSON with `sdd` and `scorecard` markdown strings |
+# MAGIC | `messages` | OpenAI-style chat history (`role` + `content`) |
+# MAGIC | `custom_inputs.session_state` | Opaque JSON string from prior `custom_outputs` — **send each turn in production** |
+# MAGIC | `custom_outputs.done` | `true` when interview is complete |
+# MAGIC | `custom_outputs.output_json` | When done, JSON with `sdd` and `scorecard` markdown strings |
 # MAGIC
-# MAGIC Use `mock` backend for integration tests without an API key. Switch widget to
-# MAGIC `anthropic` in production and ensure the secret is mounted on the endpoint.
+# MAGIC **Playground flow:** type `hi` to start → answer each question in turn. State is
+# MAGIC reconstructed by replaying message history (no `session_state` needed).
+# MAGIC
+# MAGIC Use `mock` backend for integration tests without any LLM call.
+# MAGIC
+# MAGIC **LLM auth by backend:**
+# MAGIC | Backend | Dev (notebook) | Prod (deployed agent) |
+# MAGIC |---|---|---|
+# MAGIC | `databricks` | Notebook identity via `ChatDatabricks` | Automatic passthrough — declare `DatabricksServingEndpoint` in `resources` |
+# MAGIC | `anthropic` | Secret scope / env var | Secret mounted on endpoint via `environment_vars` |
+# MAGIC | `mock` | No auth | No auth |

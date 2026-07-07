@@ -1,18 +1,84 @@
 """LLM abstraction.
 
-Two backends:
-  - MockLLM      : zero-dependency, offline. Phrases the canned plain questions and
-                   interprets answers with keyword rules. Lets the whole flow + engine
-                   + gate be tested with no API key.
-  - AnthropicLLM : uses the `anthropic` SDK + ANTHROPIC_API_KEY when you want real
-                   natural-language phrasing and extraction.
+Backends:
+  - MockLLM        : zero-dependency, offline. Keyword rules only.
+  - DatabricksLLM  : ChatDatabricks against a workspace FM / PT serving endpoint.
+                     Uses ambient notebook auth in dev and automatic passthrough
+                     M2M OAuth when deployed (declare DatabricksServingEndpoint in
+                     log_model resources — no PAT or apiToken).
+  - AnthropicLLM   : direct Anthropic API via ANTHROPIC_API_KEY (external model).
 
-The agent logic (driver/graph) is identical for both — only the text understanding differs.
+The agent logic (driver/graph) is identical for all — only text understanding differs.
 """
 from __future__ import annotations
 import json
 import os
 import re
+
+from .answer_options import append_choice_hint
+
+_PHRASE_OUTPUT_RULE = (
+    "Respond with just the question text — no quotes, no labels, "
+    "no preamble, no commentary, no markdown separators."
+)
+
+PHRASE_QUESTION_INSTRUCTION = (
+    "Rephrase the following intake question in one short, business-friendly "
+    "sentence for a non-technical business user. "
+    "Stay strictly within the intent — do not add new details. Just ask directly.\n"
+    "Do not list answer options — they are appended separately.\n\n"
+    + _PHRASE_OUTPUT_RULE
+)
+
+PHRASE_QUESTION_SIMPLER_INSTRUCTION = (
+    "Rephrase the following intake question even more simply for a "
+    "non-technical business user, in one short sentence. "
+    "Stay strictly within the intent — do not add new details.\n"
+    "Do not list answer options — they are appended separately.\n\n"
+    + _PHRASE_OUTPUT_RULE
+)
+
+_META_PREFIXES = (
+    "here's",
+    "here is",
+    "natural",
+    "friendly way",
+    "you could",
+    "try asking",
+)
+
+
+def _phrase_instruction(simpler: bool) -> str:
+    return PHRASE_QUESTION_SIMPLER_INSTRUCTION if simpler else PHRASE_QUESTION_INSTRUCTION
+
+
+def _clean_phrase_output(text: str) -> str:
+    """Strip common LLM meta-formatting from phrased questions."""
+    t = (text or "").strip()
+    if not t:
+        return t
+
+    if "---" in t:
+        parts = [p.strip() for p in t.split("---") if p.strip()]
+        for candidate in reversed(parts):
+            if "?" in candidate or len(candidate.split()) >= 4:
+                t = candidate
+                break
+
+    bold = re.match(r"^\*\*(.+)\*\*$", t, re.S)
+    if bold:
+        t = bold.group(1).strip()
+
+    while len(t) >= 2 and t[0] == t[-1] and t[0] in "\"'":
+        t = t[1:-1].strip()
+
+    lines = [ln.strip() for ln in t.splitlines() if ln.strip()]
+    if len(lines) > 1:
+        first = lines[0].lower()
+        if any(p in first for p in _META_PREFIXES):
+            t = "\n".join(lines[1:]).strip()
+
+    return t.strip()
 
 
 # ----------------------------------------------------------------------
@@ -89,13 +155,74 @@ def is_no(t: str) -> bool:
 class MockLLM:
     name = "mock"
 
-    def phrase(self, question_text: str, simpler: bool = False) -> str:
+    def phrase(
+        self,
+        question_text: str,
+        simpler: bool = False,
+        options: list[str] | None = None,
+    ) -> str:
         if simpler:
-            return "Let me put that more simply — " + question_text
-        return question_text
+            base = "Let me put that more simply — " + question_text
+        else:
+            base = question_text
+        return append_choice_hint(base, options)
 
     def extract_signals(self, qid: str, question_text: str, answer_text: str) -> dict:
         return keyword_signals(qid, answer_text)
+
+
+class DatabricksLLM:
+    """Workspace-hosted model via a serving endpoint — no manual token handling."""
+
+    name = "databricks"
+
+    def __init__(self, system_prompt: str = ""):
+        from databricks_langchain import ChatDatabricks
+        from langchain_core.messages import HumanMessage, SystemMessage
+
+        self._HumanMessage = HumanMessage
+        self._SystemMessage = SystemMessage
+        endpoint = os.environ.get(
+            "DATABRICKS_LLM_ENDPOINT", "databricks-claude-opus-4-6"
+        )
+        self.llm = ChatDatabricks(endpoint=endpoint, temperature=0.3)
+        self.system = system_prompt
+
+    def _invoke(self, prompt: str) -> str:
+        messages = []
+        if self.system:
+            messages.append(self._SystemMessage(content=self.system))
+        messages.append(self._HumanMessage(content=prompt))
+        resp = self.llm.invoke(messages)
+        content = resp.content
+        return content if isinstance(content, str) else str(content)
+
+    def phrase(
+        self,
+        question_text: str,
+        simpler: bool = False,
+        options: list[str] | None = None,
+    ) -> str:
+        prompt = f"{_phrase_instruction(simpler)}\n\nTemplate: {question_text}"
+        base = _clean_phrase_output(self._invoke(prompt))
+        return append_choice_hint(base, options)
+
+    def extract_signals(self, qid: str, question_text: str, answer_text: str) -> dict:
+        schema_hint = (
+            "Return ONLY a JSON object of relevant signals among: domain_hint(GA/DS/AA/AU), "
+            "action(act/suggest), logic(judgement/rules), steps(multi/single), needs_knowledge(bool), "
+            "impact(high/medium/low), fairness_risk(bool), sensitivity(special/personal/none), "
+            "writes(bool), multi_system(bool), sharing(bool), hitl(human/auto), regulated(bool), "
+            "analytics_kind(dashboard/diagnose/predict/recommend/adaptive). Omit keys you can't infer."
+        )
+        raw = self._invoke(
+            f"Question ({qid}): {question_text}\nUser answer: {answer_text}\n\n{schema_hint}"
+        )
+        m = re.search(r"\{.*\}", raw, re.S)
+        try:
+            return json.loads(m.group(0)) if m else {}
+        except Exception:
+            return keyword_signals(qid, answer_text)
 
 
 class AnthropicLLM:
@@ -108,14 +235,18 @@ class AnthropicLLM:
         self.model = model
         self.system = system_prompt
 
-    def phrase(self, question_text: str, simpler: bool = False) -> str:
-        instr = ("Rephrase this intake question for a non-technical business user, "
-                 "even more simply, one short sentence:" if simpler else
-                 "Ask this intake question naturally to a non-technical business user, one short sentence:")
+    def phrase(
+        self,
+        question_text: str,
+        simpler: bool = False,
+        options: list[str] | None = None,
+    ) -> str:
+        prompt = f"{_phrase_instruction(simpler)}\n\nTemplate: {question_text}"
         msg = self.client.messages.create(
             model=self.model, max_tokens=120, system=self.system,
-            messages=[{"role": "user", "content": f"{instr}\n\n{question_text}"}])
-        return "".join(b.text for b in msg.content if b.type == "text").strip()
+            messages=[{"role": "user", "content": prompt}])
+        base = _clean_phrase_output("".join(b.text for b in msg.content if b.type == "text"))
+        return append_choice_hint(base, options)
 
     def extract_signals(self, qid: str, question_text: str, answer_text: str) -> dict:
         schema_hint = ("Return ONLY a JSON object of relevant signals among: domain_hint(GA/DS/AA/AU), "
@@ -136,6 +267,8 @@ class AnthropicLLM:
 
 
 def make_llm(backend: str = "mock", system_prompt: str = ""):
+    if backend == "databricks":
+        return DatabricksLLM(system_prompt=system_prompt)
     if backend == "anthropic":
         return AnthropicLLM(system_prompt=system_prompt)
     return MockLLM()
