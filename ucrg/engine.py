@@ -125,6 +125,7 @@ def question_dict(fq: dict, *, kind: str = "standard") -> dict:
         "kind": kind,
         "answer_type": answer_type,
         "options": parse_answer_options(answer_type),
+        "gate_critical": bool(fq.get("gate_critical")),
     }
     if fq.get("additional_fields"):
         out["additional_fields"] = fq["additional_fields"]

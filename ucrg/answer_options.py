@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 
 _FREE_TEXT_TYPES = frozenset({
     "text",
@@ -18,6 +19,44 @@ _ELABORATION_ANSWER_TYPES = frozenset({
     "Yes / No + which",
     "Yes / No / which",
 })
+
+# Q16 shares externally — elaboration captures which departments/vendors.
+_ELABORATION_LABELS: dict[str, str] = {
+    "Yes / No + which": "Which ones?",
+    "Yes / No / which": "Which departments or vendors?",
+}
+
+# Explicit widget slugs — frontend must not guess from question text.
+_ANSWER_TYPE_WIDGET: dict[str, str] = {
+    "Rules / Judgement": "rules_judgement",
+    "Suggests / Acts": "suggests_acts",
+    "Single / Multi-step": "single_multi_step",
+    "Create / Process / Analyse": "create_process_analyse",
+    "Minor / Moderate / Serious": "impact_severity",
+    "Human / Acts alone / Depends": "human_oversight",
+    "Not needed / Helpful / Essential": "explainability_level",
+}
+
+# Q4 user-volume quick picks (only for Q4 — never reuse on other questions).
+_Q4_VOLUME_BANDS = ["1–10", "11–50", "51–200", "201–1,000", "1,000+"]
+
+# Widgets the agent will never emit — frontend must not substitute these locally.
+FORBIDDEN_WIDGETS = frozenset({"date_picker", "date", "calendar"})
+
+# Hard overrides when frontend heuristics misfire (deadline/unavailable → date picker).
+_QID_WIDGET_OVERRIDES: dict[str, str] = {
+    "Q22": "impact_severity",
+}
+
+
+def strip_choice_hint(text: str | None) -> str:
+    """Remove inline option hints — options belong in answer_surface metadata only."""
+    if not text:
+        return ""
+    marker = "\n\nYou can choose from:"
+    if marker in text:
+        return text.split(marker, 1)[0].strip()
+    return text.strip()
 
 
 def parse_answer_options(answer_type: str | None) -> list[str] | None:
@@ -82,7 +121,7 @@ def resolve_elaboration(answer_type: str | None) -> dict | None:
             "when": ["Yes"],
             "field": {
                 "id": "elaboration",
-                "label": "Please specify",
+                "label": _ELABORATION_LABELS.get(normalized, "Please specify"),
                 "widget": "text_long",
                 "placeholder": "Tell us a bit more…",
             },
@@ -90,15 +129,40 @@ def resolve_elaboration(answer_type: str | None) -> dict | None:
     return None
 
 
-def resolve_input_widget(answer_type: str | None, options: list[str] | None) -> str:
+def structured_option_items(options: list[str] | None) -> list[dict]:
+    """Stable {id, label} options for frontend answer surfaces."""
+    if not options:
+        return []
+    items: list[dict] = []
+    for label in options:
+        slug = re.sub(r"[^a-z0-9]+", "_", label.lower()).strip("_") or label.lower()
+        items.append({"id": slug, "label": label})
+    return items
+
+
+def resolve_input_widget(
+    answer_type: str | None,
+    options: list[str] | None,
+    *,
+    qid: str | None = None,
+) -> str:
     """Map answer_type metadata to a frontend widget id.
 
-    Explicit mapping prevents the UI from guessing (e.g. date picker on Q22).
+    Explicit mapping prevents the UI from guessing (e.g. volume bands on Q9).
     """
+    if qid == "Q4":
+        return "volume_bands"
+
+    if qid in _QID_WIDGET_OVERRIDES:
+        return _QID_WIDGET_OVERRIDES[qid]
+
     if not answer_type:
         return "text_long"
 
     normalized = answer_type.strip()
+    if normalized in _ANSWER_TYPE_WIDGET:
+        return _ANSWER_TYPE_WIDGET[normalized]
+
     if normalized.lower() == "name / role":
         return "text_short"
 
@@ -183,32 +247,91 @@ def question_input_view(question: dict | None) -> dict | None:
     if not question:
         return None
 
+    qid = question.get("id")
     answer_type = question.get("answer_type")
-    options = question.get("options")
-    if options is None and answer_type:
-        options = parse_answer_options(answer_type)
-    dynamic = question.get("dynamic_options")
-    if dynamic:
-        options = list(dynamic)
+    static_options = question.get("options")
+    if static_options is None and answer_type:
+        static_options = parse_answer_options(answer_type)
 
-    widget = resolve_input_widget(answer_type, options)
+    # Volume bands are Q4-only; categorical types keep parsed static options.
+    if qid == "Q4":
+        static_options = list(_Q4_VOLUME_BANDS)
+
+    dynamic = question.get("dynamic_options")
+    if dynamic and qid in {"Q4", "Q15"}:
+        options = list(dynamic)
+        options_source = "dynamic"
+    else:
+        options = static_options
+        options_source = "static"
+        dynamic = None
+
+    widget = resolve_input_widget(answer_type, static_options, qid=qid)
     additional_fields = resolve_additional_fields(
-        question.get("id"),
+        qid,
         question.get("additional_fields"),
     )
     elaboration = resolve_elaboration(answer_type)
-    display_text = question.get("display_text") or question.get("text")
+    display_text = strip_choice_hint(question.get("display_text") or question.get("text"))
 
     return {
-        "id": question.get("id"),
+        "id": qid,
         "text": display_text,
         "kind": question.get("kind", "standard"),
         "answer_type": answer_type,
         "options": options,
-        "options_source": "dynamic" if dynamic else "static",
+        "option_items": structured_option_items(options),
+        "static_options": static_options,
+        "options_source": options_source,
+        "options_locked": widget in set(_ANSWER_TYPE_WIDGET.values()) or widget in {
+            "yes_no", "yes_no_unsure", "volume_bands",
+        },
         "widget": widget,
         "additional_fields": additional_fields,
         "elaboration": elaboration,
-        "allows_custom_answer": widget in {"single_select", "yes_no", "yes_no_unsure"},
+        "allows_custom_answer": widget in {
+            "single_select",
+            "yes_no",
+            "yes_no_unsure",
+            "volume_bands",
+            *_ANSWER_TYPE_WIDGET.values(),
+        },
         "allows_not_sure": True,
+    }
+
+
+def build_answer_surface(question_view: dict | None, *, segment: int) -> dict | None:
+    """Frontend-compatible answer surface — always prefer this over local Q-id maps."""
+    if not question_view:
+        return None
+    widget = question_view["widget"]
+    if widget in FORBIDDEN_WIDGETS:
+        widget = "text_long"
+    return {
+        "questionId": question_view["id"],
+        "questionText": question_view["text"],
+        "segment": segment,
+        "kind": question_view.get("kind", "standard"),
+        "widget": widget,
+        "options": question_view.get("option_items") or [],
+        "allowNotSure": question_view.get("allows_not_sure", True),
+        "resolveSource": "agent",
+        "elaboration": question_view.get("elaboration"),
+        "additionalFields": question_view.get("additional_fields") or [],
+        "optionsLocked": question_view.get("options_locked", False),
+        "forbiddenWidgets": sorted(FORBIDDEN_WIDGETS),
+        "dataModel": {
+            "question": question_view["text"],
+            "options": question_view.get("option_items") or [],
+            "disabled": False,
+        },
+    }
+
+
+def ui_widget_policy() -> dict:
+    """Global UI contract shipped on every agent turn."""
+    return {
+        "resolveSource": "agent",
+        "forbiddenWidgets": sorted(FORBIDDEN_WIDGETS),
+        "neverInferWidgetFromQuestionText": True,
     }

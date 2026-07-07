@@ -25,9 +25,10 @@ _PHRASE_OUTPUT_RULE = (
 PHRASE_QUESTION_INSTRUCTION = (
     "Rephrase the following intake question in one short, business-friendly "
     "sentence for a non-technical business user. "
-    "Stay strictly within the intent — do not add new details. Just ask directly.\n"
-    "If prior conversation context is provided, reference it naturally — do not "
-    "repeat information the user already gave.\n"
+    "Stay strictly within the intent — do not add new details.\n"
+    "If prior conversation context is provided, ask ONLY for information that "
+    "is still missing. Do not repeat or rephrase facts the user already gave. "
+    "Do not ask the same topic twice in different words.\n"
     "Do not list answer options — they are appended separately.\n\n"
     + _PHRASE_OUTPUT_RULE
 )
@@ -196,11 +197,9 @@ class MockLLM:
     ) -> str:
         if simpler:
             base = "Let me put that more simply — " + question_text
-        elif context:
-            base = f"Building on what you've shared — {question_text}"
         else:
             base = question_text
-        return append_choice_hint(base, options)
+        return base
 
     def already_covered(self, qid: str, question_text: str, state) -> bool:
         return False
@@ -244,7 +243,7 @@ class DatabricksLLM:
     ) -> str:
         prompt = _phrase_prompt(question_text, simpler, context)
         base = _clean_phrase_output(self._invoke(prompt))
-        return append_choice_hint(base, options)
+        return base
 
     def already_covered(self, qid: str, question_text: str, state) -> bool:
         raw = self._invoke(_already_covered_prompt(qid, question_text, state))
@@ -290,7 +289,7 @@ class AnthropicLLM:
             model=self.model, max_tokens=120, system=self.system,
             messages=[{"role": "user", "content": prompt}])
         base = _clean_phrase_output("".join(b.text for b in msg.content if b.type == "text"))
-        return append_choice_hint(base, options)
+        return base
 
     def already_covered(self, qid: str, question_text: str, state) -> bool:
         msg = self.client.messages.create(

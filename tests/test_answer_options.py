@@ -41,7 +41,7 @@ def test_parse_minor_moderate_serious():
 
 def test_resolve_minor_moderate_serious_widget():
     options = parse_answer_options("Minor / Moderate / Serious")
-    assert resolve_input_widget("Minor / Moderate / Serious", options) == "single_select"
+    assert resolve_input_widget("Minor / Moderate / Serious", options) == "impact_severity"
 
 
 def test_resolve_yes_no_unsure_widget():
@@ -87,12 +87,56 @@ def test_question_input_view_q5_elaboration():
     assert view["elaboration"]["when"] == ["Yes"]
 
 
+def test_question_input_view_q16_yes_no_with_elaboration():
+    from ucrg.engine import form_questions, question_dict
+    from ucrg.answer_options import build_answer_surface
+    q16 = question_dict([q for q in form_questions(5) if q["id"] == "Q16"][0])
+    view = question_input_view(q16)
+    assert view["id"] == "Q16"
+    assert view["widget"] == "yes_no"
+    assert view["options"] == ["Yes", "No"]
+    assert view["elaboration"] is not None
+    surface = build_answer_surface(view, segment=5)
+    assert surface["resolveSource"] == "agent"
+    assert surface["widget"] == "yes_no"
+    assert {o["id"] for o in surface["options"]} == {"yes", "no"}
+
+
+def test_question_input_view_q9_rules_judgement():
+    from ucrg.engine import form_questions, question_dict
+    q9 = question_dict([q for q in form_questions(3) if q["id"] == "Q9"][0])
+    view = question_input_view(q9)
+    assert view["id"] == "Q9"
+    assert view["widget"] == "rules_judgement"
+    assert view["options"] == ["Rules", "Judgement"]
+    assert view["options_locked"] is True
+    assert view["options_source"] == "static"
+
+
+def test_question_input_view_q4_volume_bands_only():
+    from ucrg.engine import form_questions, question_dict
+    q4 = question_dict([q for q in form_questions(2) if q["id"] == "Q4"][0])
+    view = question_input_view(q4)
+    assert view["widget"] == "volume_bands"
+    assert view["options"][0] == "1–10"
+    assert view["options_source"] == "static"
+
+
 def test_question_input_view_q22():
+    from ucrg.answer_options import build_answer_surface, ui_widget_policy
     q = question_dict(form_questions(7)[-1])
     view = question_input_view(q)
     assert view["id"] == "Q22"
-    assert view["widget"] == "single_select"
+    assert view["widget"] == "impact_severity"
     assert view["options"] == ["Minor", "Moderate", "Serious"]
+    assert "You can choose from" not in view["text"]
+    surface = build_answer_surface(view, segment=7)
+    assert surface["widget"] == "impact_severity"
+    assert surface["resolveSource"] == "agent"
+    assert "date_picker" in surface["forbiddenWidgets"]
+    assert len(surface["options"]) == 3
+    policy = ui_widget_policy()
+    assert "date_picker" in policy["forbiddenWidgets"]
 
 
 def test_build_segment_progress():

@@ -3,7 +3,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from ucrg.context import FRIENDLY_Q1, should_ask, suggest_dynamic_options, derive_from_transcript
+from ucrg.context import FRIENDLY_Q1, should_ask, suggest_dynamic_options, derive_from_transcript, mark_skipped
 from ucrg.driver import UCRGAgent
 from ucrg.engine import lookup_followups, parent_answer_satisfied
 from ucrg.state import UCRGState
@@ -15,6 +15,53 @@ def test_friendly_q1_no_llm_rephrase():
     assert FRIENDLY_Q1 in agent.s.phrased_questions.get("Q1:standard", "")
 
 
+def test_gap_question_q13_after_q1_mentions_data():
+    from ucrg.context import build_unique_question
+    state = UCRGState()
+    state.answers["Q1"] = "HR chatbot using internal policy documents and employee data"
+    q13 = {"id": "Q13", "text": "Does any of it include personal, customer, or confidential data?"}
+    gap = build_unique_question(q13, state)
+    assert gap is not None
+    assert "confirm" in gap.lower() or "governance" in gap.lower()
+    assert gap != q13["text"]
+
+
+def test_gap_question_q4_asks_volume_not_users():
+    from ucrg.context import build_unique_question
+    state = UCRGState()
+    state.answers["Q1"] = "Chatbot for HR employees and managers"
+    q4 = {"id": "Q4", "text": "Who will use it, roughly how many, and how often?"}
+    gap = build_unique_question(q4, state)
+    assert gap is not None
+    assert "how many" in gap.lower() or "how often" in gap.lower()
+
+
+def test_followup_redundant_when_overlaps_parent():
+    from ucrg.context import followup_is_redundant
+    from ucrg.engine import form_questions
+    form_by_id = {fq["id"]: fq for fq in form_questions()}
+    state = UCRGState()
+    state.answers["Q13"] = "Yes, customer personal data"
+    item = {
+        "id": "FU-1",
+        "parent": "Q13",
+        "question": "Does any personal or customer confidential data get processed?",
+    }
+    assert followup_is_redundant(item, state, form_by_id) is True
+
+
+def test_gate_critical_never_skipped():
+    state = UCRGState()
+    state.answers["Q1"] = (
+        "Customer-facing HR chatbot using internal policy documents and customer data "
+        "from SharePoint. It affects employees and connects to Workday."
+    )
+    derive_from_transcript(state)
+    for qid in ("Q5", "Q13", "Q14", "Q15"):
+        q = {"id": qid, "text": qid, "gate_critical": True}
+        assert should_ask(q, state) is True
+
+
 def test_skip_q2_when_q1_covers_problem():
     state = UCRGState()
     state.answers["Q1"] = (
@@ -22,8 +69,9 @@ def test_skip_q2_when_q1_covers_problem():
         "which is slow and the problem is inconsistent answers."
     )
     derive_from_transcript(state)
-    q2 = {"id": "Q2", "text": "What problem does it solve?"}
+    q2 = {"id": "Q2", "text": "What problem does it solve?", "gate_critical": False}
     assert should_ask(q2, state) is False
+    mark_skipped(state, "Q2", "covered in your description of the idea")
     assert "Q2" in state.skipped_ids
 
 

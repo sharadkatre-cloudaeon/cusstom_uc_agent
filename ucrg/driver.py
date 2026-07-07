@@ -13,12 +13,14 @@ from .engine import form_questions, question_dict, segment_label, lookup_followu
 from .classify import classify_use_case, is_firm
 from .gate import gate_inputs_from, run_decision_gate
 from .compose import compose_output
-from .answer_options import normalize_user_answer
+from .answer_options import normalize_user_answer, append_choice_hint
 from .context import (
     FRIENDLY_Q1,
     _PHRASE_SKIP_IDS,
     build_phrase_context,
+    build_unique_question,
     derive_from_transcript,
+    followup_is_redundant,
     mark_skipped,
     should_ask,
     suggest_dynamic_options,
@@ -37,12 +39,20 @@ def _segments_in(asked_in: str) -> set:
 
 
 class UCRGAgent:
-    def __init__(self, backend: str = "mock", system_prompt: str = ""):
+    def __init__(
+        self,
+        backend: str = "mock",
+        system_prompt: str = "",
+        *,
+        include_choice_hints: bool = False,
+    ):
         self.llm = make_llm(backend, system_prompt)
         self.s = UCRGState()
+        self._include_choice_hints = include_choice_hints
         self._std: list = []        # remaining standard questions for current segment
         self._fu: list = []         # remaining follow-ups for current segment
         self._current = None        # the question dict awaiting an answer
+        self._form_by_id = {fq["id"]: fq for fq in form_questions()}
 
     # -- public API -----------------------------------------------------
     def start(self) -> str:
@@ -99,7 +109,7 @@ class UCRGAgent:
             if q is None:
                 self._current = None
                 return None
-            if not should_ask(q, self.s, self.llm):
+            if not should_ask(q, self.s):
                 mark_skipped(self.s, q["id"], "already covered from earlier answers")
                 continue
             text = self._phrase_question(q)
@@ -108,12 +118,11 @@ class UCRGAgent:
             return text
 
     def _attach_dynamic_options(self, q: dict):
+        q.pop("dynamic_options", None)
         dyn = suggest_dynamic_options(q["id"], self.s)
-        if dyn:
+        if dyn and q["id"] in {"Q4", "Q15"}:
             self.s.dynamic_options[q["id"]] = dyn
             q["dynamic_options"] = dyn
-        elif q["id"] in self.s.dynamic_options:
-            q["dynamic_options"] = self.s.dynamic_options[q["id"]]
 
     def _phrase_question(self, q: dict) -> str:
         cache_key = f"{q['id']}:{q['kind']}"
@@ -125,17 +134,23 @@ class UCRGAgent:
         if q["id"] in _PHRASE_SKIP_IDS and q["kind"] == "standard":
             base = FRIENDLY_Q1 if q["id"] == "Q1" else q["text"]
         else:
-            context = build_phrase_context(self.s)
-            base = self.llm.phrase(
-                q["text"],
-                simpler=simpler,
-                options=q.get("options"),
-                context=context or None,
-            )
-            if base == q["text"] and context and not simpler:
-                base = self.llm.phrase(q["text"], simpler=simpler, options=q.get("options"))
+            base = build_unique_question(q, self.s)
+            if not base:
+                context = build_phrase_context(self.s)
+                base = self.llm.phrase(
+                    q["text"],
+                    simpler=simpler,
+                    options=q.get("options"),
+                    context=context or None,
+                )
+                if base == q["text"] and context and not simpler:
+                    base = self.llm.phrase(
+                        q["text"], simpler=simpler, options=q.get("options"),
+                    )
 
         self.s.phrased_questions[cache_key] = base
+        if self._include_choice_hints and q.get("options"):
+            return append_choice_hint(base, q.get("options"))
         return base
 
     def _record(self, q, text):
@@ -159,6 +174,9 @@ class UCRGAgent:
         )
         for item in activated["ask"]:
             if item["id"] in self.s.asked_followup_ids:
+                continue
+            if followup_is_redundant(item, self.s, self._form_by_id):
+                self.s.asked_followup_ids.add(item["id"])
                 continue
             if self.s.current_segment in _segments_in(item["asked_in"]):
                 self.s.asked_followup_ids.add(item["id"])

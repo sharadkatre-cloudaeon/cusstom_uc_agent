@@ -24,7 +24,7 @@ def main():
     args = ap.parse_args()
 
     system_prompt = PROMPT.read_text(encoding="utf-8") if PROMPT.exists() else ""
-    agent = UCRGAgent(backend=args.llm, system_prompt=system_prompt)
+    agent = UCRGAgent(backend=args.llm, system_prompt=system_prompt, include_choice_hints=True)
 
     print("=" * 70)
     print(f"UCRG agent  ·  backend={args.llm}")

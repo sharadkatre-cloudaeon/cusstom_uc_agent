@@ -8,7 +8,7 @@ def _sdd(state) -> str:
     for seg in range(1, 8):
         lines.append(f"## {segment_label(seg)}")
         for q in form_questions(seg):
-            ans = state.answers.get(q["id"], "_(not provided)_")
+            ans = state.answers.get(q["id"]) or state.derived.get(q["id"]) or "_(not provided)_"
             lines.append(f"- **{q['question']}**")
             lines.append(f"  {ans}")
         lines.append("")
