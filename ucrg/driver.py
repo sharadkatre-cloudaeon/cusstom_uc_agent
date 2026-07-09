@@ -97,16 +97,25 @@ class UCRGAgent:
         self._fu = []
 
     def _pop_next_raw(self) -> dict | None:
-        if self._fu:
-            return self._fu.pop(0)
+        # Form questions first — follow-ups often restate the same topic and
+        # must not jump the queue ahead of their parent standard question.
         if self._std:
             return self._std.pop(0)
+        if self._fu:
+            return self._fu.pop(0)
         return None
 
     def _next_question(self) -> str | None:
+        # Inject follow-ups only after this segment's standards are gone
+        # (answered or skipped), so Ask-BU items never leapfrog form questions.
+        refreshed = False
         while True:
             q = self._pop_next_raw()
             if q is None:
+                if not refreshed:
+                    self._refresh_followups()
+                    refreshed = True
+                    continue
                 self._current = None
                 return None
             if not should_ask(q, self.s):
@@ -119,10 +128,24 @@ class UCRGAgent:
 
     def _attach_dynamic_options(self, q: dict):
         q.pop("dynamic_options", None)
+
+        if q.get("options_source") == "llm":
+            cached = self.s.dynamic_options.get(q["id"])
+            dyn = cached or self.llm.suggest_options(
+                q["id"], q.get("text") or "", self.s,
+            )
+            if dyn:
+                self.s.dynamic_options[q["id"]] = dyn
+                q["dynamic_options"] = dyn
+                q["options"] = dyn
+            return
+
         dyn = suggest_dynamic_options(q["id"], self.s)
-        if dyn and q["id"] in {"Q4", "Q15"}:
+        if dyn:
             self.s.dynamic_options[q["id"]] = dyn
             q["dynamic_options"] = dyn
+            if q["id"] in {"Q4", "Q15"}:
+                q["options"] = dyn
 
     def _phrase_question(self, q: dict) -> str:
         cache_key = f"{q['id']}:{q['kind']}"
@@ -159,8 +182,6 @@ class UCRGAgent:
         self.s.signals.update(self.llm.extract_signals(q["id"], q["text"], answer))
         derive_from_transcript(self.s)
         self.s.classification = classify_use_case(self.s.signals)
-        if q["kind"] == "standard" and not self._std:
-            self._refresh_followups()
 
     def _refresh_followups(self):
         if not is_firm(self.s.classification):
@@ -186,6 +207,8 @@ class UCRGAgent:
                     "kind": "followup",
                     "answer_type": "Text",
                     "options": None,
+                    "options_source": item.get("options_source"),
+                    "options_widget": item.get("options_widget"),
                 })
         seen = {o["id"] for o in self.s.open_items}
         for item in activated["tag"]:
@@ -207,9 +230,11 @@ class UCRGAgent:
         if self.s.current_segment > 7:
             return self._finalize()
         self._load_segment(self.s.current_segment)
-        self._refresh_followups()
-        intro = f"\n— {segment_label(self.s.current_segment)} —\n"
-        return {"message": intro + (self._next_question() or ""), "done": False}
+        return {
+            "message": self._next_question() or "",
+            "baseline_category": segment_label(self.s.current_segment),
+            "done": False,
+        }
 
     def _finalize(self) -> dict:
         inputs = gate_inputs_from(self.s.signals, self.s.classification)

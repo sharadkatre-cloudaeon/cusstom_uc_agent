@@ -33,6 +33,19 @@ PHRASE_QUESTION_INSTRUCTION = (
     + _PHRASE_OUTPUT_RULE
 )
 
+SUGGEST_OPTIONS_INSTRUCTION = (
+    "Given a use-case intake question and the user's prior answers, suggest 3-6 "
+    "short selectable answer options that fit THIS specific use case.\n"
+    "Derive options only from what the user already described — do not invent "
+    "unrelated domains or generic placeholders.\n"
+    "For KPI or success-metric questions, suggest concrete metric names that "
+    "match the business context (e.g. revenue, conversion, engagement when the "
+    "use case is sales or marketing; different metrics for HR, operations, etc.).\n"
+    "Each option should be a short plain-English label (2-5 words).\n"
+    "Return ONLY a JSON array of strings. Example: [\"Revenue\", \"Conversion rate\"]\n"
+    "If you cannot infer relevant options from prior answers, return []."
+)
+
 PHRASE_QUESTION_SIMPLER_INSTRUCTION = (
     "Rephrase the following intake question even more simply for a "
     "non-technical business user, in one short sentence. "
@@ -73,6 +86,58 @@ def _already_covered_prompt(qid: str, question_text: str, state) -> str:
 
 def _phrase_instruction(simpler: bool) -> str:
     return PHRASE_QUESTION_SIMPLER_INSTRUCTION if simpler else PHRASE_QUESTION_INSTRUCTION
+
+
+def _suggest_options_prompt(qid: str, question_text: str, state) -> str:
+    prior = []
+    for k, v in sorted(state.answers.items()):
+        prior.append(f"[{k}] {v}")
+    blob = "\n".join(prior) or "(none)"
+    return (
+        f"{SUGGEST_OPTIONS_INSTRUCTION}\n\n"
+        f"Question ({qid}): {question_text}\n\n"
+        f"Prior answers:\n{blob}"
+    )
+
+
+def _parse_options_json(raw: str) -> list[str] | None:
+    m = re.search(r"\[.*\]", raw or "", re.S)
+    if not m:
+        return None
+    try:
+        opts = json.loads(m.group(0))
+    except Exception:
+        return None
+    if not isinstance(opts, list):
+        return None
+    out = [str(o).strip() for o in opts if str(o).strip()]
+    return out[:6] if out else None
+
+
+_OPTION_STOPWORDS = frozenset({
+    "what", "which", "when", "where", "does", "will", "that", "this", "with",
+    "from", "have", "your", "they", "them", "their", "about", "into", "only",
+    "also", "other", "some", "any", "must", "should", "would", "could", "tool",
+    "system", "using", "need", "like", "want", "help", "make", "work", "data",
+    "team", "people", "user", "users", "daily", "weekly", "roughly", "about",
+})
+
+
+def _mock_suggest_options_from_context(state) -> list[str] | None:
+    """Derive option labels from significant terms in prior answers (no fixed catalog)."""
+    blob = " ".join(state.answers.values()).lower()
+    if not blob.strip():
+        return None
+    seen: set[str] = set()
+    labels: list[str] = []
+    for w in re.findall(r"[a-z]{4,}", blob):
+        if w in _OPTION_STOPWORDS or w in seen:
+            continue
+        seen.add(w)
+        labels.append(w.replace("_", " ").title())
+        if len(labels) >= 6:
+            break
+    return labels if len(labels) >= 2 else None
 
 
 def _parse_yes_no_reply(raw: str) -> bool:
@@ -204,6 +269,9 @@ class MockLLM:
     def already_covered(self, qid: str, question_text: str, state) -> bool:
         return False
 
+    def suggest_options(self, qid: str, question_text: str, state) -> list[str] | None:
+        return _mock_suggest_options_from_context(state)
+
     def extract_signals(self, qid: str, question_text: str, answer_text: str) -> dict:
         return keyword_signals(qid, answer_text)
 
@@ -248,6 +316,10 @@ class DatabricksLLM:
     def already_covered(self, qid: str, question_text: str, state) -> bool:
         raw = self._invoke(_already_covered_prompt(qid, question_text, state))
         return _parse_yes_no_reply(raw)
+
+    def suggest_options(self, qid: str, question_text: str, state) -> list[str] | None:
+        raw = self._invoke(_suggest_options_prompt(qid, question_text, state))
+        return _parse_options_json(raw)
 
     def extract_signals(self, qid: str, question_text: str, answer_text: str) -> dict:
         schema_hint = (
@@ -297,6 +369,14 @@ class AnthropicLLM:
             messages=[{"role": "user", "content": _already_covered_prompt(qid, question_text, state)}])
         raw = "".join(b.text for b in msg.content if b.type == "text")
         return _parse_yes_no_reply(raw)
+
+    def suggest_options(self, qid: str, question_text: str, state) -> list[str] | None:
+        msg = self.client.messages.create(
+            model=self.model, max_tokens=200, system=self.system,
+            messages=[{"role": "user", "content": _suggest_options_prompt(qid, question_text, state)}],
+        )
+        raw = "".join(b.text for b in msg.content if b.type == "text")
+        return _parse_options_json(raw)
 
     def extract_signals(self, qid: str, question_text: str, answer_text: str) -> dict:
         schema_hint = ("Return ONLY a JSON object of relevant signals among: domain_hint(GA/DS/AA/AU), "

@@ -217,6 +217,8 @@ class UCRGChatAgent(ChatAgent):
         )
 
         view = _build_view(agent, result)
+        if result.get("baseline_category"):
+            view["baseline_category"] = result["baseline_category"]
         view["debug"] = {
             "path": path,
             "conversation_id": conv_key,

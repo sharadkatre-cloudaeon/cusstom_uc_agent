@@ -36,9 +36,18 @@ def lookup_followups(
             continue
         b = _ROUTE_BUCKET[q["route"]]
         if b == "ask":
-            out["ask"].append({"id": q["id"], "question": q["rephrase_or_note"],
-                               "area": q["area"], "asked_in": q["asked_in"],
-                               "parent": q["parent"]})
+            item = {
+                "id": q["id"],
+                "question": q["rephrase_or_note"],
+                "area": q["area"],
+                "asked_in": q["asked_in"],
+                "parent": q["parent"],
+            }
+            if q.get("options_source"):
+                item["options_source"] = q["options_source"]
+            if q.get("options_widget"):
+                item["options_widget"] = q["options_widget"]
+            out["ask"].append(item)
         elif b == "auto":
             out["auto"].append({"id": q["id"], "source": q["rephrase_or_note"],
                                 "area": q["area"], "parent": q["parent"]})
@@ -55,7 +64,9 @@ def parent_answer_satisfied(parent_id: str, answers: dict, signals: dict) -> boo
 
     text = (answers.get(parent_id) or "").strip().lower()
     if not text and parent_id not in signals:
-        return True  # parent not answered yet — keep in catalog
+        # Wait for the parent form question — activating early queues near-
+        # duplicate Ask-BU items ahead of / alongside that question.
+        return False
 
     from .llm import is_no, is_not_sure, is_yes
 

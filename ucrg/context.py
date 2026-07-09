@@ -66,6 +66,14 @@ _QUESTION_GAPS: dict[str, dict] = {
         "min_touch": 1,
         "gap": "Will it share data with other departments or outside vendors?",
     },
+    "Q17": {
+        "touch": ("suggest", "draft", "recommend", "automatic", "autonomous", "approve", "human", "oversight"),
+        "min_touch": 1,
+        "gap": (
+            "You already described how it suggests vs acts. "
+            "For the actions it takes, should any require human approval first?"
+        ),
+    },
 }
 
 # Keyword heuristics: skip a question when prior answers already cover it.
@@ -130,9 +138,9 @@ def build_unique_question(question: dict, state) -> str | None:
 
 
 def followup_is_redundant(item: dict, state, form_by_id: dict) -> bool:
-    """Drop follow-ups that repeat an already-answered parent topic."""
+    """Drop follow-ups that restate the parent form question (answered or not)."""
     parent = item.get("parent") or ""
-    if not parent or parent not in state.answers:
+    if not parent:
         return False
     parent_meta = form_by_id.get(parent)
     if not parent_meta:
@@ -141,6 +149,8 @@ def followup_is_redundant(item: dict, state, form_by_id: dict) -> bool:
     parent_text = parent_meta.get("question") or ""
     if _token_overlap(follow, parent_text) >= 0.42:
         return True
+    if parent not in state.answers:
+        return False
     if _token_overlap(follow, state.answers.get(parent, "")) >= 0.38:
         return True
     return False

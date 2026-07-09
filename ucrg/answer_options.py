@@ -145,11 +145,15 @@ def resolve_input_widget(
     options: list[str] | None,
     *,
     qid: str | None = None,
+    options_widget: str | None = None,
 ) -> str:
     """Map answer_type metadata to a frontend widget id.
 
     Explicit mapping prevents the UI from guessing (e.g. volume bands on Q9).
     """
+    if options_widget:
+        return options_widget
+
     if qid == "Q4":
         return "volume_bands"
 
@@ -258,15 +262,24 @@ def question_input_view(question: dict | None) -> dict | None:
         static_options = list(_Q4_VOLUME_BANDS)
 
     dynamic = question.get("dynamic_options")
-    if dynamic and qid in {"Q4", "Q15"}:
+    options_widget = question.get("options_widget")
+    if dynamic:
         options = list(dynamic)
+        options_source = "dynamic"
+    elif qid in {"Q4", "Q15"} and question.get("options"):
+        options = list(question["options"])
         options_source = "dynamic"
     else:
         options = static_options
         options_source = "static"
         dynamic = None
 
-    widget = resolve_input_widget(answer_type, static_options, qid=qid)
+    widget = resolve_input_widget(
+        answer_type,
+        static_options,
+        qid=qid,
+        options_widget=options_widget if dynamic else None,
+    )
     additional_fields = resolve_additional_fields(
         qid,
         question.get("additional_fields"),
@@ -291,6 +304,7 @@ def question_input_view(question: dict | None) -> dict | None:
         "elaboration": elaboration,
         "allows_custom_answer": widget in {
             "single_select",
+            "multi_select",
             "yes_no",
             "yes_no_unsure",
             "volume_bands",

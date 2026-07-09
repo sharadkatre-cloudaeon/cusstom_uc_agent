@@ -2528,7 +2528,9 @@
       "function": "Govern",
       "original": "Are data definitions (KPIs, metrics) documented and governed?",
       "route": "Ask BU",
-      "asked_in": "Seg 1",
+      "asked_in": "Seg 4",
+      "options_source": "llm",
+      "options_widget": "multi_select",
       "rephrase_or_note": "What are the key metrics/KPIs it should report, and are their definitions agreed?",
       "parent": "Q13",
       "link_type": "Consolidates"

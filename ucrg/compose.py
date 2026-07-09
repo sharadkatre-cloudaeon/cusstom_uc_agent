@@ -3,6 +3,19 @@ document and a framework scorecard (both Markdown)."""
 from .engine import form_questions, segment_label, DOMAIN_NAMES
 
 
+def _md_cell(value) -> str:
+    """Escape pipe chars so markdown tables stay intact."""
+    text = "" if value is None else str(value)
+    return text.replace("|", "\\|").replace("\n", " ").strip()
+
+
+def _kv_table(rows: list[tuple[str, str]]) -> list[str]:
+    lines = ["| Field | Value |", "| --- | --- |"]
+    for field, value in rows:
+        lines.append(f"| {_md_cell(field)} | {_md_cell(value)} |")
+    return lines
+
+
 def _sdd(state) -> str:
     lines = ["# Use-Case Requirements (SDD)", ""]
     for seg in range(1, 8):
@@ -18,38 +31,57 @@ def _sdd(state) -> str:
 def _scorecard(state) -> str:
     p = state.classification.get("primary", {})
     g = state.gate_verdict
-    lines = ["# Framework Scorecard", "",
-             "## Classification (internal — for the development team)",
-             f"- Domain: {p.get('domain_name', '?')} ({p.get('domain', '?')})",
-             f"- Maturity level: L{p.get('level', '?')} — {p.get('name', '?')}",
-             f"- Confidence: {p.get('confidence', '?')}", ""]
+    lines = [
+        "# Framework Scorecard",
+        "",
+        "## Classification (internal — for the development team)",
+        *_kv_table(
+            [
+                ("Domain", f"{p.get('domain_name', '?')} ({p.get('domain', '?')})"),
+                ("Maturity level", f"L{p.get('level', '?')} — {p.get('name', '?')}"),
+                ("Confidence", str(p.get("confidence", "?"))),
+            ]
+        ),
+        "",
+    ]
 
-    lines += ["## Decision-gate verdict",
-              f"- Verdict: **{g.get('verdict', 'n/a')}**",
-              f"- Level used: L{g.get('level_used', '?')}"]
+    verdict_rows: list[tuple[str, str]] = [
+        ("Verdict", f"**{g.get('verdict', 'n/a')}**"),
+        ("Level used", f"L{g.get('level_used', '?')}"),
+    ]
     if g.get("recommended_level") and g.get("verdict") == "ESCALATE":
-        lines.append(f"- Recommended level: L{g['recommended_level']}")
+        verdict_rows.append(("Recommended level", f"L{g['recommended_level']}"))
     if g.get("reason"):
-        lines.append(f"- Reason: {g['reason']}")
+        verdict_rows.append(("Reason", g["reason"]))
     if g.get("triggers"):
-        lines.append(f"- Triggers fired: {', '.join(g['triggers'])}")
+        verdict_rows.append(("Triggers fired", ", ".join(g["triggers"])))
     if g.get("overlay"):
-        lines.append(f"- Governance overlay: {', '.join(g['overlay'])}")
+        verdict_rows.append(("Governance overlay", ", ".join(g["overlay"])))
     if g.get("conditions"):
-        lines.append(f"- Conditions: {', '.join(g['conditions'])}")
+        verdict_rows.append(("Conditions", ", ".join(g["conditions"])))
     if g.get("note"):
-        lines.append(f"- Note: {g['note']}")
-    lines.append("")
+        verdict_rows.append(("Note", g["note"]))
 
-    lines += ["## Gate inputs"]
-    for k, v in (g.get("inputs") or {}).items():
-        lines.append(f"- {k}: {v}")
-    lines.append("")
+    lines += ["## Decision-gate verdict", *_kv_table(verdict_rows), ""]
 
-    lines += ["## Open-items register (for Development / Security / Legal)",
-              f"_{len(state.open_items)} technical questions tagged out of the interview._", ""]
+    gate_inputs = g.get("inputs") or {}
+    lines += [
+        "## Gate inputs",
+        *_kv_table([(str(k), str(v)) for k, v in gate_inputs.items()]),
+        "",
+    ]
+
+    lines += [
+        "## Open-items register (for Development / Security / Legal)",
+        f"_{len(state.open_items)} technical questions tagged out of the interview._",
+        "",
+        "| ID | Area | Open item |",
+        "| --- | --- | --- |",
+    ]
     for it in state.open_items:
-        lines.append(f"- [{it['id']}] ({it.get('area', '')}) {it['open_item']}")
+        lines.append(
+            f"| {_md_cell(it['id'])} | {_md_cell(it.get('area', ''))} | {_md_cell(it['open_item'])} |"
+        )
     lines.append("")
     return "\n".join(lines)
 

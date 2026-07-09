@@ -9,14 +9,65 @@ from ucrg.gate import run_decision_gate
 
 
 def test_activation_counts_ga_l3():
-    r = lookup_followups("GA", 3)
+    # Without parent answers only CLS-parented items activate.
+    bare = lookup_followups("GA", 3)
+    assert bare["ask"] == [] and bare["auto"] == []
+    assert all(i.get("parent") == "CLS" for i in bare["tag"])
+
+    answers = {
+        "Q3": "HR",
+        "Q6": "yes, fairness risk",
+        "Q8": "writes to systems",
+        "Q9": "rules based",
+        "Q13": "yes, customer personal data",
+        "Q14": "yes, needs company documents",
+        "Q16": "yes, shared outside the team",
+        "Q17": "a person reviews before it is used",
+        "Q18": "legal and compliance review",
+        "Q20": "cost limit of 10k",
+    }
+    signals = {
+        "sensitivity": "personal",
+        "needs_knowledge": True,
+        "sharing": True,
+        "hitl": "review",
+        "fairness_risk": True,
+        "posture": "writes",
+    }
+    r = lookup_followups("GA", 3, answers=answers, signals=signals)
     assert (len(r["ask"]), len(r["auto"]), len(r["tag"])) == (9, 3, 14)
 
 
 def test_cumulative_is_monotonic():
+    # Use satisfying parents so level growth is not masked by gating.
+    answers = {
+        "Q3": "ops",
+        "Q5": "yes high impact",
+        "Q6": "yes",
+        "Q8": "writes",
+        "Q9": "rules",
+        "Q13": "yes personal",
+        "Q14": "yes knowledge",
+        "Q16": "yes sharing",
+        "Q17": "human reviews",
+        "Q18": "compliance",
+        "Q20": "budget ok",
+    }
+    signals = {
+        "sensitivity": "personal",
+        "needs_knowledge": True,
+        "sharing": True,
+        "hitl": "review",
+        "impact": "high",
+        "fairness_risk": True,
+        "posture": "writes",
+    }
     prev = 0
     for lvl in range(1, 6):
-        total = sum(len(v) for v in lookup_followups("AA", lvl).values())
+        total = sum(
+            len(v)
+            for v in lookup_followups("AA", lvl, answers=answers, signals=signals).values()
+        )
         assert total >= prev
         prev = total
 

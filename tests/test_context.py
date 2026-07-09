@@ -36,6 +36,20 @@ def test_gap_question_q4_asks_volume_not_users():
     assert "how many" in gap.lower() or "how often" in gap.lower()
 
 
+def test_gap_question_q17_reuses_action_context():
+    from ucrg.context import build_unique_question
+    state = UCRGState()
+    state.answers["Q8"] = "Both suggest and act depending on context."
+    q17 = {
+        "id": "Q17",
+        "text": "For any decision or action it takes, must a human approve first, or can it act on its own?",
+    }
+    gap = build_unique_question(q17, state)
+    assert gap is not None
+    assert "already described" in gap.lower()
+    assert "human approval" in gap.lower()
+
+
 def test_followup_redundant_when_overlaps_parent():
     from ucrg.context import followup_is_redundant
     from ucrg.engine import form_questions
@@ -48,6 +62,25 @@ def test_followup_redundant_when_overlaps_parent():
         "question": "Does any personal or customer confidential data get processed?",
     }
     assert followup_is_redundant(item, state, form_by_id) is True
+
+
+def test_followup_redundant_before_parent_answered():
+    """Near-identical Ask-BU wording must not re-ask the form topic."""
+    from ucrg.context import followup_is_redundant
+    from ucrg.engine import form_questions
+    form_by_id = {fq["id"]: fq for fq in form_questions()}
+    state = UCRGState()
+    item = {
+        "id": "AU-DGP-3.2",
+        "parent": "Q16",
+        "question": form_by_id["Q16"]["question"],
+    }
+    assert followup_is_redundant(item, state, form_by_id) is True
+
+
+def test_parent_unanswered_blocks_followups():
+    assert parent_answer_satisfied("Q13", {}, {}) is False
+    assert parent_answer_satisfied("Q16", {}, {}) is False
 
 
 def test_gate_critical_never_skipped():
